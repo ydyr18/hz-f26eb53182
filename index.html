@@ -104,7 +104,7 @@ let ctx, analyser, buf, floor = 0.004, spoke = false, loudMs = 0, quietMs = 0, i
 
 function setMode(m, state, sub) { mode = m; document.body.className = m === "speak" ? "speakN" : m === "listen" ? (spoke ? "talking" : "listen") : "";
   $("state").textContent = state; $("sub").textContent = sub || ""; ring(0); }
-function ring(k) { $("ring").setAttribute("stroke-dasharray", (k * 100).toFixed(1) + " 100"); }
+function ring(k) { const r = $("ring"); r.setAttribute("stroke-dasharray", (k * 100).toFixed(1) + " 100"); r.style.opacity = k > 0 ? 1 : 0; }
 function sceneOf(i) { for (let j = i; j >= 0; j--) if (ITEMS[j].scene && !ITEMS[j].who) return ITEMS[j].scene; return ""; }
 function skipScenes(i) { while (i < ITEMS.length && !ITEMS[i].who) i++; return i; }
 
