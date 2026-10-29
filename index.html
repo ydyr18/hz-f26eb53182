@@ -79,6 +79,7 @@ input[type=range]{flex:1;accent-color:var(--olive)}
   <summary>הגדרות</summary>
   <label>שקט לפני המשפט הבא <input id="sil" type="range" min="2" max="8" step="0.5" value="4"><span class="val" id="silv">4 שנ'</span></label>
   <label>רגישות מיקרופון <input id="sens" type="range" min="1" max="10" step="1" value="5"><span class="val" id="sensv">5</span></label>
+  <label>בלי מיקרופון: עוברים בכפתור דלג או בכפתורי ההגה <input id="manual" type="checkbox"></label>
   <label>להציג את השורה שלי <input id="show" type="checkbox"></label>
   <label>להציג את השורה של נפתלי <input id="showN" type="checkbox"></label>
 </details>
@@ -93,14 +94,34 @@ const store = { get(k, d) { try { const v = localStorage.getItem("hz_" + k); ret
 ITEMS.forEach((it, i) => { if (it.scene && !it.who) { const o = document.createElement("option"); o.value = i; o.textContent = it.scene; $("from").appendChild(o); } });
 $("from").value = store.get("from", "0");
 $("sil").value = store.get("sil", "4"); $("sens").value = store.get("sens", "5");
-$("show").checked = store.get("show", "0") === "1"; $("showN").checked = store.get("showN", "0") === "1";
+$("show").checked = store.get("show", "0") === "1"; $("manual").checked = store.get("manual", "0") === "1"; $("showN").checked = store.get("showN", "0") === "1";
 const upd = () => { $("silv").textContent = $("sil").value + " שנ'"; $("sensv").textContent = $("sens").value;
-  store.set("sil", $("sil").value); store.set("sens", $("sens").value); store.set("show", $("show").checked ? "1" : "0"); store.set("showN", $("showN").checked ? "1" : "0"); };
-["sil", "sens", "show", "showN"].forEach(id => $(id).addEventListener("input", upd)); upd();
+  store.set("sil", $("sil").value); store.set("sens", $("sens").value); store.set("show", $("show").checked ? "1" : "0"); store.set("showN", $("showN").checked ? "1" : "0"); store.set("manual", $("manual").checked ? "1" : "0"); };
+["sil", "sens", "show", "showN", "manual"].forEach(id => $(id).addEventListener("input", upd)); upd();
 
 const audio = new Audio(); audio.preload = "auto";
 let idx = 0, mode = "idle", paused = false, wake = null;
-let ctx, analyser, buf, floor = 0.004, spoke = false, loudMs = 0, quietMs = 0, ignoreUntil = 0;
+let ctx, analyser, buf, stream = null, floor = 0.004, spoke = false, loudMs = 0, quietMs = 0, ignoreUntil = 0, ticking = false;
+
+// The mic is open only during your turn: an open mic puts the phone in "call" mode, which moves playback to the
+// earpiece and cuts the car's Bluetooth media audio. Raw capture (no echo cancel / AGC) also keeps it out of call mode.
+async function micOn() {
+  if ($("manual").checked) return false;
+  if (stream) return true;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
+    if (!ctx) ctx = new (window.AudioContext || window.webkitAudioContext)();
+    if (ctx.state === "suspended") await ctx.resume();
+    analyser = ctx.createAnalyser(); analyser.fftSize = 1024; buf = new Float32Array(analyser.fftSize);
+    ctx.createMediaStreamSource(stream).connect(analyser);
+    if (!ticking) { ticking = true; setInterval(tick, 50); }
+    $("err").hidden = true; return true;
+  } catch (e) {
+    $("err").hidden = false; $("err").textContent = "אין גישה למיקרופון. אשר גישה בדפדפן, או סמן בהגדרות 'בלי מיקרופון' ועבור בכפתור דלג.";
+    return false;
+  }
+}
+function micOff() { if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; } analyser = null; $("lvl").style.width = "0"; }
 
 function setMode(m, state, sub) { mode = m; document.body.className = m === "speak" ? "speakN" : m === "listen" ? (spoke ? "talking" : "listen") : "";
   $("state").textContent = state; $("sub").textContent = sub || ""; ring(0); }
@@ -115,6 +136,7 @@ function step() {
   if (idx >= ITEMS.length) { setMode("idle", "סוף ההצגה", "כל הכבוד! אפשר לבחור סצנה ולהתחיל שוב."); $("line").textContent = ""; return; }
   const it = ITEMS[idx];
   if (it.who === "N") {
+    micOff();
     setMode("speak", "נפתלי מדבר", "");
     $("line").innerHTML = $("showN").checked ? "<b>נפתלי:</b> " + esc(it.text) : "";
     audio.src = AUDIO[it.audio]; audio.currentTime = 0;
@@ -122,7 +144,9 @@ function step() {
     audio.play().catch(() => { setMode("idle", "לחץ המשך", "הדפדפן עצר את הניגון."); $("go").textContent = "המשך"; $("go").hidden = false; });
   } else {
     spoke = false; loudMs = 0; quietMs = 0;
-    setMode("listen", "תורך", "אני מחכה שתדבר, ואז לשקט של " + $("sil").value + " שנ'");
+    setMode("listen", "תורך", $("manual").checked ? "בסוף השורה שלך: דלג, או 'הבא' בהגה" : "אני מחכה שתדבר, ואז לשקט של " + $("sil").value + " שנ'");
+    ignoreUntil = performance.now() + 600;   // the mic takes a moment to settle after opening
+    micOn();
     $("line").innerHTML = $("show").checked ? "<b>אתה:</b> " + esc(it.text) : "";
   }
 }
@@ -150,21 +174,24 @@ function tick() {
 
 async function start() {
   $("err").hidden = true;
-  if (!ctx) {
+  if (!$("manual").checked && !stream) { await micOn(); micOff(); }   // ask for the mic once, up front
+  // steering-wheel / Bluetooth buttons: next = skip, previous = back a line, play/pause = pause
+  if ("mediaSession" in navigator) {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
-      ctx = new (window.AudioContext || window.webkitAudioContext)();
-      const src = ctx.createMediaStreamSource(stream); analyser = ctx.createAnalyser(); analyser.fftSize = 1024;
-      buf = new Float32Array(analyser.fftSize); src.connect(analyser); setInterval(tick, 50);
-    } catch (e) { $("err").hidden = false; $("err").textContent = "אין גישה למיקרופון. אשר גישה בדפדפן, או השתמש בכפתור דלג אחרי כל שורה שלך."; }
+      navigator.mediaSession.metadata = new MediaMetadata({ title: "חזרות – להיות טוב", artist: "נפתלי" });
+      navigator.mediaSession.setActionHandler("nexttrack", () => $("next").click());
+      navigator.mediaSession.setActionHandler("previoustrack", () => $("back").click());
+      navigator.mediaSession.setActionHandler("play", () => { if (paused) $("pause").click(); });
+      navigator.mediaSession.setActionHandler("pause", () => { if (!paused) $("pause").click(); });
+    } catch (e) {}
   }
-  if (ctx && ctx.state === "suspended") await ctx.resume();
   try { wake = await navigator.wakeLock.request("screen"); } catch (e) {}
   audio.muted = true; audio.src = AUDIO[Object.keys(AUDIO)[0]]; await audio.play().catch(() => {}); audio.pause(); audio.muted = false; // unlock sound
   $("go").hidden = true; paused = false; $("pause").textContent = "השהה";
   step();
 }
 $("go").onclick = () => { if (mode === "idle" && $("go").textContent === "התחל") idx = +$("from").value; start(); };
+$("manual").addEventListener("change", () => { if ($("manual").checked) micOff(); else if (mode === "listen") micOn(); });
 $("from").onchange = () => { store.set("from", $("from").value); audio.pause(); idx = +$("from").value; if (mode !== "idle") step(); };
 $("next").onclick = () => { if (mode === "speak") { audio.pause(); idx++; step(); } else if (mode === "listen") finishTurn(); };
 $("back").onclick = () => { audio.pause(); let j = Math.min(idx, ITEMS.length - 1);
@@ -172,7 +199,7 @@ $("back").onclick = () => { audio.pause(); let j = Math.min(idx, ITEMS.length - 
   while (j > 0 && ITEMS[j].who !== "N") j--;
   if (j >= 0 && ITEMS[j].who === "N") { idx = j; step(); } };
 $("pause").onclick = () => { paused = !paused; $("pause").textContent = paused ? "המשך" : "השהה";
-  if (paused) { audio.pause(); $("state").textContent = "מושהה"; $("sub").textContent = ""; document.body.className = ""; } else step(); };
+  if (paused) { audio.pause(); micOff(); $("state").textContent = "מושהה"; $("sub").textContent = ""; document.body.className = ""; } else step(); };
 document.addEventListener("visibilitychange", async () => { if (document.visibilityState === "visible" && wake !== null) { try { wake = await navigator.wakeLock.request("screen"); } catch (e) {} } });
 </script>
 </body>
